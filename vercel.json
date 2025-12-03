@@ -1,9 +1,5 @@
 {
-  "version": 2,
-  "build": {
-    "env": {}
-  },
-  "routes": [
-    { "src": "/(.*)", "dest": "/client/build/$1" }
-  ]
+  "rootDirectory": "client",
+  "buildCommand": "npm install && npm run build",
+  "outputDirectory": "build"
 }
