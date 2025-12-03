@@ -359,7 +359,6 @@ export default function CallUI({
       socketRef.current = null;
       cleanupCall();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [localUid, SIGNAL_URL]);
 
   // Answer the stored pending offer (user gesture)
