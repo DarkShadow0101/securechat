@@ -1,496 +1,281 @@
-// client/src/components/VoiceCall/CallUI.jsx
 import React, { useEffect, useRef, useState } from "react";
-import { io } from "socket.io-client";
 import CryptoJS from "crypto-js";
 import { useAuth } from "../../contexts/AuthContext";
+import { Phone, PhoneOff, Mic, MicOff, User } from 'lucide-react';
 
-/**
- * Props:
- * - otherUserId (string) required: UID you're calling / expecting calls from
- * - otherUserName (string) optional
- * - signalingUrl (string) optional
- * - enableSignalEncryption (bool) optional (default true)
- * - onClose (fn) optional
- */
 export default function CallUI({
-  otherUserId,
-  otherUserName = "Remote",
-  signalingUrl,
+  otherUserId: propOtherUserId,
+  otherUserName = "Remote User",
+  otherUserPhoto = null, // Expects URL or null
+  incomingCallData = null,
   enableSignalEncryption = true,
   onClose = () => {},
 }) {
   const { currentUser } = useAuth();
   const localUid = currentUser?.uid;
-  const SIGNAL_URL = signalingUrl || process.env.REACT_APP_SIGNAL_URL || "http://localhost:5000";
 
-  const socketRef = useRef(null);
+  // Refs
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
-  const remoteStreamRef = useRef(null);
-  const pendingOfferRef = useRef(null); // store incoming offer until user accepts
   const remoteAudioRef = useRef(null);
+  const iceCandidatesQueue = useRef([]); 
+  const otherUserIdRef = useRef(incomingCallData ? incomingCallData.from : propOtherUserId);
 
-  const [status, setStatus] = useState("idle"); // idle | calling | ringing | in-call | ended | error
+  // State
+  const [status, setStatus] = useState(incomingCallData ? "ringing" : "calling");
   const [isMuted, setIsMuted] = useState(false);
-  const [connected, setConnected] = useState(false);
-  const [remoteStream, setRemoteStream] = useState(null);
-  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [imgError, setImgError] = useState(false); 
 
-  // --- encryption helpers (symmetric) ---
-  const getSharedSecret = (a = "", b = "") => {
-    const A = (a || "").trim();
-    const B = (b || "").trim();
-    return CryptoJS.SHA256([A, B].sort().join("")).toString();
+  // Timer
+  useEffect(() => {
+    let timer;
+    if (status === 'in-call') {
+      timer = setInterval(() => setDuration(prev => prev + 1), 1000);
+    }
+    return () => clearInterval(timer);
+  }, [status]);
+
+  const formatTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
+  const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+  // --- Encryption ---
+  const getSharedSecret = (uid1, uid2) => CryptoJS.SHA256([uid1, uid2].sort().join("")).toString();
+  
   const encodePayload = (payload) => {
     if (!enableSignalEncryption) return { payload, encrypted: false };
-    try {
-      const secret = getSharedSecret(localUid || "", otherUserId || "");
-      const plaintext = JSON.stringify(payload || {});
-      const ciphertext = CryptoJS.AES.encrypt(plaintext, secret).toString();
-      return { payload: ciphertext, encrypted: true };
-    } catch (e) {
-      console.error("signal encrypt failed", e);
-      return { payload, encrypted: false };
-    }
+    const secret = getSharedSecret(localUid, otherUserIdRef.current);
+    const plaintext = JSON.stringify(payload);
+    const ciphertext = CryptoJS.AES.encrypt(plaintext, secret).toString();
+    return { payload: ciphertext, encrypted: true };
   };
 
-  // decode using sender and localUid so it works even if otherUserId isn't set yet
-  const decodePayload = (payload, encrypted, senderUid) => {
-    if (!encrypted) return payload;
-    try {
-      const secret = getSharedSecret(senderUid || "", localUid || "");
-      const bytes = CryptoJS.AES.decrypt(payload, secret);
-      const txt = bytes.toString(CryptoJS.enc.Utf8);
-      return JSON.parse(txt);
-    } catch (e) {
-      console.error("signal decrypt failed", e);
-      return null;
-    }
-  };
-
-  // --- signaling envelope send helper ---
   const sendSignal = (type, payload) => {
-    if (!socketRef.current || !socketRef.current.connected) {
-      console.warn("socket not connected, cannot send signal", type);
-      return;
-    }
-    const encoded = encodePayload(payload);
-    const envelope = {
-      type,
-      from: localUid,
-      to: otherUserId,
-      payload: encoded.payload,
-      encrypted: encoded.encrypted,
-      ts: Date.now(),
-    };
-    socketRef.current.emit("signal", envelope);
-    console.debug("[signal SEND]", type, "to", otherUserId);
+    const socket = window.__SIGNAL_SOCKET__;
+    if (!socket || !socket.connected) return;
+    const { payload: finalPayload, encrypted } = encodePayload(payload);
+    socket.emit("signal", {
+      type, from: localUid, to: otherUserIdRef.current, payload: finalPayload, encrypted, ts: Date.now()
+    });
   };
 
-  // --- WebRTC helpers ---
-  const rtcConfig = {
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      // add TURN servers if you need NAT relay
-    ],
-  };
-
+  // --- WebRTC Setup ---
   const createPeerConnection = () => {
+    if (pcRef.current) return pcRef.current;
     const pc = new RTCPeerConnection(rtcConfig);
-    pcRef.current = pc;
 
-    pc.onicecandidate = (ev) => {
-      if (ev.candidate) {
-        // send ICE to the other side
-        if (!otherUserId) {
-          console.warn("no otherUserId to send ICE to");
-          return;
-        }
-        sendSignal("ice", { candidate: ev.candidate });
-      }
+    pc.onicecandidate = (event) => {
+      if (event.candidate) sendSignal("ice", { candidate: event.candidate });
     };
 
-    pc.ontrack = (ev) => {
-      const [s] = ev.streams;
-      console.debug("pc.ontrack - remote stream", s);
-      remoteStreamRef.current = s || null;
-      setRemoteStream(s || null);
-
-      // try autoplay; if blocked we'll set a flag so UI can ask user to play
-      setTimeout(() => {
-        try {
-          if (remoteAudioRef.current && remoteAudioRef.current.srcObject !== s) {
-            remoteAudioRef.current.srcObject = s;
-            const p = remoteAudioRef.current.play?.();
-            if (p && typeof p.then === "function") {
-              p.catch((err) => {
-                console.debug("autoplay blocked", err);
-                setAutoplayBlocked(true);
-              });
-            } else {
-              setAutoplayBlocked(false);
-            }
-          }
-        } catch (e) {
-          setAutoplayBlocked(true);
-        }
-      }, 100);
+    pc.ontrack = (event) => {
+      console.log("🔊 Audio Stream Received");
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.srcObject = event.streams[0];
+        remoteAudioRef.current.play().catch(e => console.error("Autoplay blocked", e));
+      }
     };
 
     pc.onconnectionstatechange = () => {
-      console.debug("pc.connectionState", pc.connectionState);
-      if (pc.connectionState === "connected") {
-        setStatus("in-call");
-      }
-      if (["disconnected", "failed", "closed"].includes(pc.connectionState)) {
-        setStatus("ended");
-        cleanupCall();
-      }
+      if (pc.connectionState === "connected") setStatus("in-call");
+      if (["disconnected", "failed", "closed"].includes(pc.connectionState)) endCall("connection-lost");
     };
 
+    pcRef.current = pc;
     return pc;
   };
 
-  const cleanupCall = () => {
-    try { pcRef.current?.close(); } catch (e) {}
-    pcRef.current = null;
-    try { localStreamRef.current?.getTracks().forEach((t) => t.stop()); } catch (e) {}
-    localStreamRef.current = null;
-    remoteStreamRef.current = null;
-    setRemoteStream(null);
-    setIsMuted(false);
-    setAutoplayBlocked(false);
-    pendingOfferRef.current = null;
-  };
-
   const getLocalMedia = async () => {
-    // user gesture required to call this (Start/Answer)
     try {
-      if (localStreamRef.current) {
-        try { localStreamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
-        localStreamRef.current = null;
-      }
-      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      localStreamRef.current = s;
-      return s;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      localStreamRef.current = stream;
+      return stream;
     } catch (err) {
-      console.error("getLocalMedia failed", err);
-      throw err;
+      alert("Microphone access denied.");
+      endCall("local-error");
     }
   };
 
-  // Caller: create offer and send
-  const startCall = async () => {
-    if (!localUid || !otherUserId) {
-      console.warn("missing ids to start call");
-      return;
+  const processIceQueue = async () => {
+    const pc = pcRef.current;
+    if (!pc || !pc.remoteDescription) return;
+    while (iceCandidatesQueue.current.length > 0) {
+      const candidate = iceCandidatesQueue.current.shift();
+      try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch (e) {}
     }
+  };
+
+  // --- Call Actions ---
+  const startCall = async () => {
+    if (!otherUserIdRef.current) return;
     setStatus("calling");
     try {
       const pc = createPeerConnection();
-      const localStream = await getLocalMedia();
-      localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+      const stream = await getLocalMedia();
+      if (!stream) return;
+      stream.getTracks().forEach(t => pc.addTrack(t, stream));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      // send offer with sdp
       sendSignal("offer", { sdp: offer.sdp, type: offer.type });
-      console.debug("offer sent");
-    } catch (err) {
-      console.error("startCall error", err);
-      setStatus("error");
-    }
+    } catch (e) { setStatus("error"); }
   };
 
-  // Callee: handle incoming offer and send answer (called when user presses Answer)
-  const handleIncomingOffer = async (payload, fromUid) => {
+  const answerCall = async () => {
+    if (!incomingCallData) return;
+    setStatus("connecting");
     try {
-      setStatus("ringing");
-      const { sdp } = payload || {};
       const pc = createPeerConnection();
-      const localStream = await getLocalMedia(); // must be user gesture (Answer button)
-      localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
-      await pc.setRemoteDescription({ type: "offer", sdp });
+      const stream = await getLocalMedia();
+      if (!stream) return;
+      stream.getTracks().forEach(t => pc.addTrack(t, stream));
+      
+      const remoteDesc = new RTCSessionDescription(incomingCallData.payload);
+      await pc.setRemoteDescription(remoteDesc);
+      await processIceQueue();
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      // Send answer back to caller
-      // IMPORTANT: when we send, otherUserId must be the caller's uid — temporarily override if needed
-      const prevOther = otherUserId;
-      // if otherUserId doesn't match caller, the server will forward if "to" matches; but here we encode using otherUserId prop.
       sendSignal("answer", { sdp: answer.sdp, type: answer.type });
-      console.debug("answer sent");
       setStatus("in-call");
-    } catch (err) {
-      console.error("handleIncomingOffer error", err);
-      setStatus("error");
-    }
-  };
-
-  const handleIncomingAnswer = async (payload) => {
-    try {
-      const { sdp } = payload || {};
-      if (!pcRef.current) {
-        console.warn("no pc to set remote answer");
-        return;
-      }
-      await pcRef.current.setRemoteDescription({ type: "answer", sdp });
-      setStatus("in-call");
-    } catch (err) {
-      console.error("handleIncomingAnswer error", err);
-    }
-  };
-
-  const handleIncomingIce = async (payload) => {
-    try {
-      const { candidate } = payload || {};
-      if (!candidate) return;
-      if (!pcRef.current) {
-        console.warn("no pc when ICE arrived; creating pc");
-        createPeerConnection();
-      }
-      await pcRef.current.addIceCandidate(candidate).catch((e) => {
-        console.warn("addIceCandidate warning", e);
-      });
-    } catch (err) {
-      console.error("handleIncomingIce error", err);
-    }
+    } catch (e) { setStatus("error"); }
   };
 
   const endCall = (reason = "local-hangup") => {
-    try {
-      sendSignal("hangup", { reason });
-    } catch (e) {}
-    cleanupCall();
+    if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }
+    if (localStreamRef.current) { localStreamRef.current.getTracks().forEach(t => t.stop()); localStreamRef.current = null; }
+    if (reason === "local-hangup" && otherUserIdRef.current) sendSignal("hangup", { reason });
     setStatus("ended");
-    onClose?.();
+    setTimeout(onClose, 1000);
   };
 
-  const declineCall = (fromUid) => {
-    try {
-      // tell caller we declined
-      if (socketRef.current && socketRef.current.connected) {
-        const enc = encodePayload({ reason: "declined" });
-        socketRef.current.emit("signal", {
-          type: "hangup",
-          from: localUid,
-          to: fromUid || otherUserId,
-          payload: enc.payload,
-          encrypted: enc.encrypted,
-          ts: Date.now(),
-        });
-      }
-    } catch (e) {}
-    pendingOfferRef.current = null;
-    setStatus("idle");
-  };
-
-  const toggleMute = () => {
-    if (!localStreamRef.current) return;
-    const newMuted = !isMuted;
-    localStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = !newMuted));
-    setIsMuted(newMuted);
-  };
-
-  // --- socket setup & signal handling ---
+  // --- Signal Listener ---
   useEffect(() => {
-    if (!localUid) {
-      console.warn("CallUI: currentUser not ready");
-      return;
-    }
+    const handleGlobalSignal = async (e) => {
+      const { envelope, payload } = e.detail;
+      if (envelope.from !== otherUserIdRef.current) return;
 
-    const socket = io(SIGNAL_URL, { transports: ["websocket"] });
-    socketRef.current = socket;
-
-    socket.on("connect", () => {
-      console.debug("socket connected", socket.id);
-      setConnected(true);
-      socket.emit("register", { uid: localUid });
-    });
-
-    socket.on("disconnect", () => {
-      console.debug("socket disconnected");
-      setConnected(false);
-    });
-
-    socket.on("connect_error", (err) => {
-      console.error("socket connect_error", err);
-    });
-
-    socket.on("signal", (envelope) => {
-      try {
-        if (!envelope) return;
-        // if the server forwarded a signal that isn't for us, ignore
-        if (envelope.to && envelope.to !== localUid) return;
-
-        console.debug("[signal RECV]", envelope.type, "from", envelope.from);
-
-        // decode payload using the actual sender so encryption works no matter which peer
-        const payload = decodePayload(envelope.payload, envelope.encrypted, envelope.from);
-
-        switch (envelope.type) {
-          case "offer":
-            // store pending offer and set state to ringing so user can Accept/Decline
-            pendingOfferRef.current = { payload, from: envelope.from };
-            setStatus("ringing");
-            break;
-          case "answer":
-            if (envelope.from === otherUserId) handleIncomingAnswer(payload);
-            break;
-          case "ice":
-            // only process ICE from the peer who is calling/being called
-            if (envelope.from) handleIncomingIce(payload);
-            break;
-          case "hangup":
-            // remote ended or declined
-            cleanupCall();
-            setStatus("ended");
-            break;
-          default:
-            console.warn("unknown signal type", envelope.type);
-        }
-      } catch (err) {
-        console.error("socket signal handler error", err);
+      const pc = pcRef.current;
+      if (envelope.type === "hangup") { 
+         if(status !== 'ended') endCall("remote-hangup"); 
+         return; 
       }
-    });
-
-    return () => {
-      try { socket.disconnect(); } catch (e) {}
-      socketRef.current = null;
-      cleanupCall();
-    };
-  }, [localUid, SIGNAL_URL]);
-
-  // Answer the stored pending offer (user gesture)
-  const answerPendingOffer = async () => {
-    try {
-      const pending = pendingOfferRef.current;
-      if (!pending) {
-        console.warn("No pending offer to answer");
+      if (envelope.type === "answer" && pc) {
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload));
+          await processIceQueue();
+        } catch(err) {}
         return;
-      }
-      await handleIncomingOffer(pending.payload, pending.from);
-      // clear pending after answering
-      pendingOfferRef.current = null;
-    } catch (err) {
-      console.error("answerPendingOffer error", err);
-    }
-  };
-
-  // Wire remote audio element -> remoteStream
-  useEffect(() => {
-    if (remoteAudioRef.current && remoteStream) {
-      try {
-        remoteAudioRef.current.srcObject = remoteStream;
-        const p = remoteAudioRef.current.play?.();
-        if (p && typeof p.then === "function") {
-          p.catch(() => setAutoplayBlocked(true));
+      } 
+      if (envelope.type === "ice") {
+        if (pc && pc.remoteDescription) {
+           try { await pc.addIceCandidate(new RTCIceCandidate(payload.candidate)); } catch (err) {}
         } else {
-          setAutoplayBlocked(false);
+           iceCandidatesQueue.current.push(payload.candidate);
         }
-      } catch (e) {
-        setAutoplayBlocked(true);
       }
-    }
-  }, [remoteStream]);
+    };
 
-  // UI: play button if autoplay blocked
-  const handlePlayRemote = () => {
-    try {
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.play().then(() => setAutoplayBlocked(false)).catch(() => setAutoplayBlocked(true));
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
+    window.addEventListener("signal:message", handleGlobalSignal);
+    if (!incomingCallData && status === "calling") startCall();
 
-  // minimal UI
+    return () => window.removeEventListener("signal:message", handleGlobalSignal);
+  }, []);
+
   return (
-    <div className="w-[360px] max-w-full rounded-xl shadow-lg p-4 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100">
-      <div className="flex items-center justify-between mb-2">
-        <div>
-          <div className="text-sm font-semibold">Voice Call</div>
-          <div className="text-xs text-gray-500">{otherUserName} ({otherUserId})</div>
+    // BACKDROP BLURRED OVERLAY
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+      <audio ref={remoteAudioRef} autoPlay playsInline />
+      
+      {/* COMPACT GLASS CARD */}
+      <div className="w-full max-w-sm bg-white dark:bg-gray-800 rounded-3xl shadow-2xl overflow-hidden transform scale-100 border border-white/10">
+        
+        {/* PREMIUM HEADER GRADIENT */}
+        <div className="h-28 bg-gradient-to-r from-blue-600 to-purple-600 relative">
+           <div className="absolute -bottom-12 left-1/2 transform -translate-x-1/2">
+              <div className="relative">
+                 {/* PROFILE PICTURE WITH GLOW */}
+                 <div className="w-28 h-28 rounded-full border-4 border-white dark:border-gray-800 bg-gray-700 overflow-hidden flex items-center justify-center shadow-lg">
+                    {otherUserPhoto && !imgError ? (
+                       <img 
+                         src={otherUserPhoto} 
+                         className="w-full h-full object-cover" 
+                         alt="User"
+                         onError={() => setImgError(true)} 
+                       />
+                    ) : (
+                       <User size={48} className="text-gray-300" />
+                    )}
+                 </div>
+                 
+                 {/* PULSING ANIMATION (Ringing/Calling) */}
+                 {(status === 'ringing' || status === 'calling') && (
+                    <>
+                      <span className="absolute inset-0 rounded-full border-2 border-white/50 animate-[ping_1.5s_cubic-bezier(0,0,0.2,1)_infinite]"></span>
+                      <span className="absolute inset-0 rounded-full border-2 border-white/30 animate-[ping_1.5s_cubic-bezier(0,0,0.2,1)_infinite_0.5s]"></span>
+                    </>
+                 )}
+                 {/* Connected Indicator */}
+                 {status === 'in-call' && (
+                    <div className="absolute bottom-1 right-1 w-5 h-5 bg-green-500 border-2 border-white dark:border-gray-800 rounded-full"></div>
+                 )}
+              </div>
+           </div>
         </div>
-        <div className="text-xs">
-          <div className={`px-2 py-1 rounded ${status === "in-call" ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-700"}`}>
-            {status}
-          </div>
+
+        {/* CALL INFO */}
+        <div className="pt-14 pb-8 px-6 text-center">
+           <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-1 tracking-tight">{otherUserName}</h3>
+           <p className="text-sm font-semibold text-blue-500 mb-8 uppercase tracking-wider">
+              {status === 'ringing' ? 'Incoming Call...' : 
+               status === 'calling' ? 'Calling...' : 
+               status === 'in-call' ? formatTime(duration) : 
+               status === 'connecting' ? 'Connecting...' : 'Call Ended'}
+           </p>
+
+           {/* ACTION BUTTONS */}
+           <div className="flex justify-center items-center gap-8">
+              {status === 'ringing' ? (
+                 <>
+                    {/* Answer */}
+                    <button onClick={answerCall} className="w-16 h-16 rounded-full bg-green-500 hover:bg-green-600 flex items-center justify-center text-white shadow-xl shadow-green-500/30 transition-all hover:scale-110 active:scale-95">
+                       <Phone size={28} fill="currentColor" />
+                    </button>
+                    {/* Decline */}
+                    <button onClick={() => endCall("declined")} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center text-white shadow-xl shadow-red-500/30 transition-all hover:scale-110 active:scale-95">
+                       <PhoneOff size={28} />
+                    </button>
+                 </>
+              ) : (
+                 <>
+                    {/* Mute (Only in-call) */}
+                    {status === 'in-call' && (
+                       <button onClick={() => {
+                          if(localStreamRef.current) {
+                             localStreamRef.current.getAudioTracks()[0].enabled = !isMuted;
+                             setIsMuted(!isMuted);
+                          }
+                       }} className={`w-14 h-14 rounded-full flex items-center justify-center shadow-md transition-all active:scale-95 ${isMuted ? 'bg-white text-gray-900 hover:bg-gray-100' : 'bg-gray-700/50 text-white hover:bg-gray-700'}`}>
+                          {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
+                       </button>
+                    )}
+                    
+                    {/* End Call */}
+                    {status !== 'ended' && (
+                       <button onClick={() => endCall("local-hangup")} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center text-white shadow-xl shadow-red-500/30 transition-all hover:scale-110 active:scale-95">
+                          <PhoneOff size={28} />
+                       </button>
+                    )}
+                 </>
+              )}
+           </div>
+           
+           <p className="mt-6 text-xs text-gray-400 font-medium">End-to-End Encrypted</p>
         </div>
-      </div>
-
-      <div className="mb-3">
-        <audio ref={remoteAudioRef} autoPlay playsInline />
-        <div className="text-xs text-gray-500">
-          Remote audio will appear here when call connects. {autoplayBlocked && "Autoplay is blocked — press Play or accept the call to enable audio."}
-        </div>
-      </div>
-
-      {/* show incoming caller info + Accept / Decline when ringing */}
-      {status === "ringing" && pendingOfferRef.current && (
-        <div className="mb-3 p-3 rounded-md bg-yellow-50 dark:bg-yellow-900/20 text-sm">
-          <div className="font-medium">Incoming call from {pendingOfferRef.current.from}</div>
-          <div className="mt-2 flex gap-2">
-            <button
-              onClick={async () => {
-                // Answer (user gesture) -> will call getUserMedia inside handleIncomingOffer
-                await answerPendingOffer();
-              }}
-              className="px-3 py-2 bg-green-600 text-white rounded-md"
-            >
-              Answer
-            </button>
-            <button
-              onClick={() => {
-                declineCall(pendingOfferRef.current.from);
-              }}
-              className="px-3 py-2 bg-red-500 text-white rounded-md"
-            >
-              Decline
-            </button>
-          </div>
-        </div>
-      )}
-
-      <div className="flex items-center justify-between space-x-2">
-        <button
-          onClick={async () => {
-            if (status === "idle" || status === "ended") {
-              await startCall();
-            } else if (status === "calling") {
-              // do nothing — waiting for answer
-            } else if (status === "in-call") {
-              toggleMute();
-            } else if (status === "ringing") {
-              // if ringing and user clicks main button, treat it as Answer
-              await answerPendingOffer();
-            }
-          }}
-          className="flex-1 px-3 py-2 rounded-md bg-primary text-white hover:opacity-90"
-        >
-          {status === "idle" || status === "ended" ? "Start Call" : (status === "ringing" ? "Answer" : (status === "in-call" ? (isMuted ? "Unmute" : "Mute") : "Calling..."))}
-        </button>
-
-        <button
-          onClick={() => {
-            endCall("user-closed");
-          }}
-          className="px-3 py-2 rounded-md bg-red-500 text-white hover:opacity-90"
-        >
-          Hangup
-        </button>
-      </div>
-
-      {autoplayBlocked && (
-        <div className="mt-3 flex items-center gap-2">
-          <button onClick={handlePlayRemote} className="px-3 py-1 text-sm bg-gray-200 rounded">Play remote audio</button>
-          <span className="text-xs text-gray-500">If you accepted the call and can't hear audio, press Play.</span>
-        </div>
-      )}
-
-      <div className="mt-3 text-xs text-gray-500">
-        Socket: {connected ? <span className="text-green-600">connected</span> : <span className="text-red-600">disconnected</span>}
       </div>
     </div>
   );

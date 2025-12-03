@@ -1,29 +1,43 @@
-import React, { useState, useEffect } from 'react';
+// client/src/components/AnimatedBackground.js
+import React, { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 
 /**
- * Renders an animated background with floating particles and decorative blobs.
- * This component is self-contained and manages its own animation state.
+ * AnimatedBackground (fixed)
+ * - preserves same visuals + framer-motion animations
+ * - guards setParticles with mountedRef to avoid calling setter after unmount
+ * - uses functional setState to avoid stale reads
+ * - uses unique keys so React can reconcile without surprises
+ * - uses explicit px units for inline styles
  */
+
 const AnimatedBackground = () => {
   const [particles, setParticles] = useState([]);
+  const mountedRef = useRef(false);
 
-  // Effect to generate and animate particles on an interval
   useEffect(() => {
+    mountedRef.current = true;
+
     const generateParticles = () => {
+      const now = Date.now();
       const newParticles = Array.from({ length: 20 }, (_, i) => ({
-        id: i,
+        id: `${now}-${i}`, // unique per generation
         x: Math.random() * window.innerWidth,
         y: Math.random() * window.innerHeight,
         size: Math.random() * 4 + 2,
         duration: Math.random() * 20 + 10,
         delay: Math.random() * 5,
       }));
-      setParticles(newParticles);
+      // guard setter and use functional update
+      if (mountedRef.current) setParticles(() => newParticles);
     };
+
     generateParticles();
     const interval = setInterval(generateParticles, 30000); // Regenerate every 30 seconds
-    return () => clearInterval(interval);
+    return () => {
+      mountedRef.current = false;
+      clearInterval(interval);
+    };
   }, []);
 
   return (
@@ -34,10 +48,10 @@ const AnimatedBackground = () => {
           key={particle.id}
           className="absolute bg-white/20 rounded-full"
           style={{
-            left: particle.x,
-            top: particle.y,
-            width: particle.size,
-            height: particle.size,
+            left: `${particle.x}px`,
+            top: `${particle.y}px`,
+            width: `${particle.size}px`,
+            height: `${particle.size}px`,
           }}
           animate={{ y: [0, -100, 0], opacity: [0, 1, 0], scale: [0, 1, 0] }}
           transition={{

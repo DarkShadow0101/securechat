@@ -1,8 +1,9 @@
-// client/src/components/SignalingListener.jsx
 import React, { useEffect, useRef } from "react";
 import { io } from "socket.io-client";
 import CryptoJS from "crypto-js";
 import { useAuth } from "../contexts/AuthContext";
+
+const PING_INTERVAL_MS = 10000; // Frequent ping to keep Render awake
 
 export default function SignalingListener({
   signalingUrl,
@@ -12,98 +13,105 @@ export default function SignalingListener({
 }) {
   const { currentUser } = useAuth();
   const socketRef = useRef(null);
+  const pingRef = useRef(null);
 
-  const SIGNAL_URL = signalingUrl || process.env.REACT_APP_SIGNAL_URL || "http://localhost:5000";
+  // Normalize URL
+  const SIGNAL_URL = (signalingUrl || "https://signaling-server-ig4a.onrender.com").replace(/\/$/, "");
 
-  // same shared secret derivation as CallUI
-  const getSharedSecret = (uid1 = "", uid2 = "") => {
+  // --- Encryption Helpers ---
+  const getSharedSecret = (uid1, uid2) => {
     const a = (uid1 || "").trim();
     const b = (uid2 || "").trim();
-    const combined = [a, b].sort().join("");
-    return CryptoJS.SHA256(combined).toString();
+    return CryptoJS.SHA256([a, b].sort().join("")).toString();
   };
 
   const decodePayload = (payload, encrypted, localUid, fromUid) => {
-    if (!encrypted) return payload;
+    if (!encrypted) {
+      try { return typeof payload === "string" ? JSON.parse(payload) : payload; }
+      catch { return payload; }
+    }
     try {
       const secret = getSharedSecret(localUid, fromUid);
       const bytes = CryptoJS.AES.decrypt(payload, secret);
       const txt = bytes.toString(CryptoJS.enc.Utf8);
       return JSON.parse(txt);
     } catch (e) {
-      console.error("SignalingListener: failed to decrypt payload", e);
+      console.error("SignalingListener: Decrypt failed", e);
       return null;
     }
   };
 
   useEffect(() => {
-    if (!currentUser?.uid) {
-      // user not ready yet
-      return;
+    if (!currentUser?.uid) return;
+
+    // 1. Initialize Global Socket (Singleton)
+    if (!window.__SIGNAL_SOCKET__ || !window.__SIGNAL_SOCKET__.connected) {
+      console.log("🔌 Initializing Global Socket...");
+      const socket = io(SIGNAL_URL, {
+        transports: ["websocket", "polling"],
+        reconnection: true,
+        reconnectionAttempts: Infinity,
+        reconnectionDelay: 1000,
+        timeout: 20000,
+      });
+      window.__SIGNAL_SOCKET__ = socket;
     }
 
-    const socket = io(SIGNAL_URL, { transports: ["websocket"] });
-    socketRef.current = socket;
+    socketRef.current = window.__SIGNAL_SOCKET__;
+    const socket = socketRef.current;
 
-    socket.on("connect", () => {
-      console.debug("SignalingListener connected", socket.id);
+    // 2. Event Handlers
+    const handleConnect = () => {
+      console.log("✅ Signaling Connected:", socket.id);
       if (autoRegister) {
-        socket.emit("register", { uid: currentUser.uid });
-        console.debug("SignalingListener: registered uid", currentUser.uid);
+        socket.emit("join-call", currentUser.uid);
       }
-    });
-
-    socket.on("disconnect", () => {
-      console.debug("SignalingListener disconnected");
-    });
-
-    socket.on("signal", (envelope) => {
-      try {
-        if (!envelope) return;
-        // ignore signals not destined for this uid (server usually forwards correctly)
-        if (envelope.to && envelope.to !== currentUser.uid) return;
-
-        console.debug("[SignalingListener] signal recv:", envelope.type, "from", envelope.from);
-
-        const payload = decodePayload(envelope.payload, envelope.encrypted, currentUser.uid, envelope.from);
-
-        // If it's an offer, call onIncomingCall so the app can open UI
-        if (envelope.type === "offer") {
-          try {
-            // offer payload should contain sdp and type
-            onIncomingCall(envelope.from, payload, envelope);
-            // try to show browser notification (optional)
-            if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-              new Notification("Incoming call", {
-                body: `Call from ${envelope.from}`,
-              });
-            } else if (typeof Notification !== "undefined" && Notification.permission !== "denied") {
-              Notification.requestPermission().then((perm) => {
-                if (perm === "granted") {
-                  new Notification("Incoming call", { body: `Call from ${envelope.from}` });
-                }
-              });
-            }
-          } catch (err) {
-            console.error("SignalingListener onIncomingCall handler error:", err);
-          }
-        }
-      } catch (err) {
-        console.error("SignalingListener signal handler error:", err);
-      }
-    });
-
-    socket.on("connect_error", (err) => {
-      console.error("SignalingListener connect_error", err);
-    });
-
-    return () => {
-      try {
-        socket.disconnect();
-      } catch (e) {}
-      socketRef.current = null;
+      // Start Heartbeat
+      if (pingRef.current) clearInterval(pingRef.current);
+      pingRef.current = setInterval(() => {
+        if (socket.connected) socket.emit("ping-check");
+      }, PING_INTERVAL_MS);
+      
+      window.dispatchEvent(new CustomEvent("signal:connected", { detail: { id: socket.id } }));
     };
-  }, [currentUser?.uid, SIGNAL_URL]);
+
+    const handleSignal = (envelope) => {
+      if (!envelope) return;
+      if (envelope.to && envelope.to !== currentUser.uid) return; // Not for us
+
+      const payload = decodePayload(envelope.payload, envelope.encrypted, currentUser.uid, envelope.from);
+      console.debug(`📩 Signal [${envelope.type}] from ${envelope.from}`);
+
+      if (envelope.type === "offer") {
+        // CRITICAL: Trigger incoming call UI via Dashboard
+        onIncomingCall(envelope.from, payload, envelope);
+      } else {
+        // Broadcast answer/ice to CallUI
+        window.dispatchEvent(new CustomEvent("signal:message", { detail: { envelope, payload } }));
+      }
+    };
+
+    const handleDisconnect = (reason) => {
+      console.warn("⚠️ Signaling Disconnected:", reason);
+      if (reason === "io server disconnect") socket.connect();
+    };
+
+    // 3. Attach Listeners
+    socket.on("connect", handleConnect);
+    socket.on("signal", handleSignal);
+    socket.on("disconnect", handleDisconnect);
+
+    // Immediate check
+    if (socket.connected) handleConnect();
+
+    // Cleanup listeners (but keep socket alive)
+    return () => {
+      socket.off("connect", handleConnect);
+      socket.off("signal", handleSignal);
+      socket.off("disconnect", handleDisconnect);
+      if (pingRef.current) clearInterval(pingRef.current);
+    };
+  }, [currentUser?.uid, SIGNAL_URL, autoRegister, onIncomingCall]);
 
   return null;
 }

@@ -19,24 +19,29 @@ const io = new Server(server, {
     methods: ["GET", "POST"]
   }
 });
-
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
   socket.on("join-call", (userId) => {
-    socket.join(userId);
+    try {
+      socket.join(userId);
+      console.debug(`Socket ${socket.id} joined room ${userId}`);
+    } catch (e) { console.warn("join-call error", e); }
   });
 
   socket.on("signal", (data) => {
-    io.to(data.to).emit("signal", data);
+    try {
+      if (!data || !data.to) {
+        console.warn("signal missing 'to' field", data);
+        return;
+      }
+      io.to(data.to).emit("signal", data);
+    } catch (e) {
+      console.error("signal forward error", e);
+    }
   });
 
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
   });
 });
-
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () =>
-  console.log(`Signaling server running on port ${PORT}`)
-);
