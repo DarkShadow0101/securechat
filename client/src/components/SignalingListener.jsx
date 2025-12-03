@@ -103,7 +103,6 @@ export default function SignalingListener({
       } catch (e) {}
       socketRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.uid, SIGNAL_URL]);
 
   return null;
