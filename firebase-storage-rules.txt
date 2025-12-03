@@ -1,0 +1,28 @@
+// Copy and paste these rules into your Firebase Console > Storage > Rules
+
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Allow authenticated users to read and write their own files
+    match /uploads/{userId}/{allPaths=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Allow public read access to uploaded files (for sharing)
+    match /uploads/{userId}/{allPaths=**} {
+      allow read: if true;
+    }
+  }
+}
+
+// Alternative - More permissive rules for testing (use this if the above doesn't work):
+/*
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
+*/ 
