@@ -19,7 +19,7 @@ A stunning login page with dynamic animations built with React.js, Node.js, and 
 
 ## 🚀 Live Demo
 
-[View Live Demo](https://puni-bhai-login-page.vercel.app)
+[View Live Demo](https://securechat-eta.vercel.app/)
 
 ## 🛠️ Tech Stack
 
