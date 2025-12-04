@@ -94,12 +94,11 @@ const Dashboard = () => {
   const [wallpaper, setWallpaper] = useState('');
   const [wallpaperFile, setWallpaperFile] = useState(null);
   
-  // --- FIX APPLIED HERE ---
+  // Settings Modal States
   const [wallpaperPreview, setWallpaperPreview] = useState('');
   const [newDisplayName, setNewDisplayName] = useState('');
   const [profilePicFile, setProfilePicFile] = useState(null);
   const [profilePicPreview, setProfilePicPreview] = useState('');
-  // -----------------------
 
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   const [selectedBackupFrequency, setSelectedBackupFrequency] = useState('off');
@@ -469,6 +468,12 @@ const Dashboard = () => {
   return (
     <div className={`flex flex-col h-screen transition-colors duration-300 bg-[var(--bg-chat)] text-[var(--text-primary)]`}>
       
+      {/* GLOBAL CSS FOR HIDING SCROLLBARS */}
+      <style>{`
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      `}</style>
+
       {/* HEADER */}
       <header className={`shadow-sm border-b z-10 ${darkMode ? 'border-gray-800' : 'border-gray-200'} bg-[var(--bg-sidebar)]`}>
         <div className="px-4 py-3 flex justify-between items-center">
@@ -511,7 +516,8 @@ const Dashboard = () => {
                    style={{ borderColor: `var(--theme-color)` }} />
               </div>
               
-              <div className="flex-1 overflow-y-auto space-y-1">
+              {/* Added no-scrollbar class here */}
+              <div className="flex-1 overflow-y-auto space-y-1 no-scrollbar">
                  {filteredUsers.map(user => (
                     <div key={user.uid} onClick={() => setSelectedChatUser(user)}
                       className={`flex items-center p-3 rounded-lg cursor-pointer transition-all ${selectedChatUser?.uid === user.uid ? 'text-white' : 'hover:bg-gray-100 dark:hover:bg-gray-800'}`}
@@ -579,8 +585,8 @@ const Dashboard = () => {
                    </div>
                 </div>
 
-                {/* Messages List */}
-                <div className="flex-1 overflow-y-auto p-4 space-y-4 relative" 
+                {/* Messages List - Added no-scrollbar class here */}
+                <div className="flex-1 overflow-y-auto p-4 space-y-4 relative no-scrollbar" 
                      style={{ 
                        backgroundImage: wallpaper ? `url(${wallpaper})` : 'none', 
                        backgroundSize: 'cover', 
@@ -714,11 +720,11 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* --- SETTINGS MODAL (UPDATED FOR SCROLL & STICKY BUTTONS) --- */}
+      {/* --- SETTINGS MODAL (Updated) --- */}
       <AnimatePresence>
          {isProfileModalOpen && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-               {/* Fixed Height & Flex Layout added here for scrolling */}
+               {/* Added no-scrollbar to main modal container too if desired, but kept internal scroll */}
                <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} 
                   className={`w-full max-w-md rounded-2xl shadow-2xl border flex flex-col max-h-[85vh] overflow-hidden ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}`}>
                   
@@ -730,8 +736,8 @@ const Dashboard = () => {
                      </button>
                   </div>
 
-                  {/* FORM BODY (Scrollable) */}
-                  <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+                  {/* FORM BODY (Scrollable with hidden scrollbar for cleaner look) */}
+                  <div className="flex-1 overflow-y-auto p-6 no-scrollbar">
                      <form id="settings-form" onSubmit={handleProfileUpdate} className="space-y-6">
                         <div className="flex justify-center">
                            <div onClick={() => profilePicInputRef.current.click()} className="relative w-24 h-24 rounded-full bg-gray-800 cursor-pointer overflow-hidden group border-2" style={{ borderColor: `var(--theme-color)` }}>
