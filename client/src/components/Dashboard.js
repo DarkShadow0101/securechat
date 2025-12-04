@@ -93,10 +93,14 @@ const Dashboard = () => {
   const [currentChatConfig, setCurrentChatConfig] = useState(null);
   const [wallpaper, setWallpaper] = useState('');
   const [wallpaperFile, setWallpaperFile] = useState(null);
+  
+  // --- FIX APPLIED HERE ---
   const [wallpaperPreview, setWallpaperPreview] = useState('');
   const [newDisplayName, setNewDisplayName] = useState('');
   const [profilePicFile, setProfilePicFile] = useState(null);
   const [profilePicPreview, setProfilePicPreview] = useState('');
+  // -----------------------
+
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
   const [selectedBackupFrequency, setSelectedBackupFrequency] = useState('off');
   const [theme, setTheme] = useState('purple'); // Default theme
@@ -159,7 +163,7 @@ const Dashboard = () => {
 
   // --- INCOMING CALL HANDLER ---
   const handleIncomingCall = useCallback(async (callerUid, payload, envelope) => {
-    let found = users.find(u => u.uid === callerUid);
+    let found = (users || []).find(u => u.uid === callerUid);
     if (!found) {
       try {
         const userDoc = await getDoc(doc(db, 'users', callerUid));
@@ -210,10 +214,11 @@ const Dashboard = () => {
       setNewMessage("");
       setReplyingTo(null);
       setUsers(prev => {
-        const idx = prev.findIndex(u => u.uid === selectedChatUser.uid);
-        if (idx === -1) return prev;
-        const u = prev[idx];
-        return [u, ...prev.slice(0, idx), ...prev.slice(idx + 1)];
+        const usersArray = prev || [];
+        const idx = usersArray.findIndex(u => u.uid === selectedChatUser.uid);
+        if (idx === -1) return usersArray;
+        const u = usersArray[idx];
+        return [u, ...usersArray.slice(0, idx), ...usersArray.slice(idx + 1)];
       });
     } catch (error) {
       setNotification({ type: 'error', message: 'Message failed to send.' });
@@ -314,7 +319,7 @@ const Dashboard = () => {
       if (wallpaperFile) newWallpaperURL = await uploadFileToFirebase(wallpaperFile, `wallpapers/${currentUser.uid}`);
       
       if (newDisplayName || photoURL !== currentUser.photoURL) {
-         await updateProfile(currentUser, { displayName: newDisplayName || currentUser.displayName, photoURL });
+          await updateProfile(currentUser, { displayName: newDisplayName || currentUser.displayName, photoURL });
       }
       await updateDoc(doc(db, 'users', currentUser.uid), {
         displayName: newDisplayName || currentUser.displayName,
@@ -324,7 +329,8 @@ const Dashboard = () => {
       setWallpaper(newWallpaperURL);
       setUserPreferences({ wallpaper: newWallpaperURL, backupFrequency: selectedBackupFrequency, theme });
       setNotification({ type: 'success', message: 'Settings Saved!' });
-      setIsProfileModalOpen(false);
+      
+      setIsProfileModalOpen(false); 
     } catch (e) {
       console.error(e);
       setNotification({ type: 'error', message: `Save failed: ${e.message}` });
@@ -453,7 +459,7 @@ const Dashboard = () => {
 
   const toggleDarkMode = () => setDarkMode(!darkMode);
   
-  const filteredUsers = users.filter(user => 
+  const filteredUsers = (users || []).filter(user => 
     (user.displayName || '').toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -550,8 +556,15 @@ const Dashboard = () => {
                 <div className={`p-4 border-b flex justify-between items-center z-10 ${darkMode ? 'border-gray-800' : 'border-gray-200'} bg-[var(--bg-sidebar)]`}>
                    <div className="flex items-center">
                       <button onClick={() => setSelectedChatUser(null)} className="md:hidden mr-3 p-2 rounded-full hover:bg-gray-800"><ArrowLeft /></button>
-                      <h2 className="font-bold text-lg">{selectedChatUser.displayName}</h2>
-                      {selectedChatUser.isOnline && <span className="ml-2 w-2 h-2 bg-green-500 rounded-full"></span>}
+                      <div className="flex items-center gap-3">
+                         <div className="w-10 h-10 rounded-full bg-gray-700 overflow-hidden flex items-center justify-center border border-gray-500">
+                            {selectedChatUser.photoURL ? <img src={selectedChatUser.photoURL} className="w-full h-full object-cover" /> : <User size={24} className="text-gray-400" />}
+                         </div>
+                         <div>
+                            <h2 className="font-bold text-lg">{selectedChatUser.displayName}</h2>
+                            {selectedChatUser.isOnline === true && <span className="text-xs text-green-500 font-medium">● Online</span>}
+                         </div>
+                      </div>
                    </div>
                    <div className="flex items-center gap-3">
                      <button onClick={() => setShowCallUI(true)} className="p-2 rounded-full hover:bg-gray-800 text-gray-400 hover:text-white transition-colors" title="Call">
@@ -569,17 +582,17 @@ const Dashboard = () => {
                 {/* Messages List */}
                 <div className="flex-1 overflow-y-auto p-4 space-y-4 relative" 
                      style={{ 
-                        backgroundImage: wallpaper ? `url(${wallpaper})` : 'none', 
-                        backgroundSize: 'cover', 
-                        backgroundPosition: 'center',
+                       backgroundImage: wallpaper ? `url(${wallpaper})` : 'none', 
+                       backgroundSize: 'cover', 
+                       backgroundPosition: 'center',
                      }}>
-                   {wallpaper && <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px] pointer-events-none sticky top-0 h-full w-full"></div>}
+                   {wallpaper && <div className="absolute inset-0 pointer-events-none sticky top-0 h-full w-full"></div>}
 
                    <div className="relative z-0 flex flex-col justify-end min-h-full pb-4">
                      {loadingChat ? (
                         <div className="flex justify-center p-4"><p className="text-gray-500">Loading messages...</p></div>
                      ) : (
-                        messages.map((msg, idx) => {
+                        (messages || []).map((msg, idx) => {
                            const isMe = msg.senderId === currentUser.uid;
                            const chatRoomId = [currentUser.uid, selectedChatUser.uid].sort().join('_');
                            const text = msg.type === 'text' ? decryptMessage(msg.text, chatRoomId) : '';
@@ -658,42 +671,42 @@ const Dashboard = () => {
                 {/* Input Area */}
                 <div className={`p-4 border-t ${darkMode ? 'border-gray-800' : 'border-gray-200'} bg-[var(--bg-sidebar)]`}>
                    {replyingTo && (
-                      <div className="flex justify-between items-center text-sm p-3 bg-gray-800/50 rounded-xl mb-3 border-l-4" style={{ borderColor: `var(--theme-color)` }}>
-                         <div>
-                            <span className="font-bold text-xs" style={{ color: `var(--theme-color)` }}>Replying to {replyingTo.senderName}</span>
-                            <p className="text-xs opacity-70 truncate max-w-xs text-gray-300">Message...</p>
-                         </div>
-                         <button onClick={() => setReplyingTo(null)} className="p-1 rounded-full hover:bg-gray-700"><X size={14} className="text-gray-400"/></button>
-                      </div>
+                     <div className="flex justify-between items-center text-sm p-3 bg-gray-800/50 rounded-xl mb-3 border-l-4" style={{ borderColor: `var(--theme-color)` }}>
+                        <div>
+                           <span className="font-bold text-xs" style={{ color: `var(--theme-color)` }}>Replying to {replyingTo.senderName}</span>
+                           <p className="text-xs opacity-70 truncate max-w-xs text-gray-300">Message...</p>
+                        </div>
+                        <button onClick={() => setReplyingTo(null)} className="p-1 rounded-full hover:bg-gray-700"><X size={14} className="text-gray-400"/></button>
+                     </div>
                    )}
                    
                    <form onSubmit={handleSendMessage} className="flex items-end gap-3">
-                      <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileSelect} />
-                      <button type="button" onClick={() => fileInputRef.current.click()} className="p-3 rounded-full hover:bg-gray-800 text-gray-400 transition-colors" style={{ color: `var(--theme-color)` }}>
-                         <Paperclip size={22} />
-                      </button>
-                      
-                      <div className={`flex-1 rounded-2xl border flex items-center transition-all focus-within:ring-2 ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-100 border-gray-200'}`} style={{ borderColor: `var(--theme-color)` }}>
-                         <textarea ref={textareaRef} value={newMessage} onChange={e => setNewMessage(e.target.value)}
-                            onKeyDown={e => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e); } }}
-                            placeholder={isRecording ? "Recording audio..." : "Type a message..."}
-                            className={`flex-1 bg-transparent border-none focus:ring-0 p-3 max-h-32 resize-none ${darkMode ? 'text-white placeholder-gray-500' : 'text-gray-900'}`}
-                            rows={1}
-                            disabled={isRecording}
-                         />
-                      </div>
+                     <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileSelect} />
+                     <button type="button" onClick={() => fileInputRef.current.click()} className="p-3 rounded-full hover:bg-gray-800 text-gray-400 transition-colors" style={{ color: `var(--theme-color)` }}>
+                        <Paperclip size={22} />
+                     </button>
+                     
+                     <div className={`flex-1 rounded-2xl border flex items-center transition-all focus-within:ring-2 ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-100 border-gray-200'}`} style={{ borderColor: `var(--theme-color)` }}>
+                        <textarea ref={textareaRef} value={newMessage} onChange={e => setNewMessage(e.target.value)}
+                          onKeyDown={e => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e); } }}
+                          placeholder={isRecording ? "Recording audio..." : "Type a message..."}
+                          className={`flex-1 bg-transparent border-none focus:ring-0 p-3 max-h-32 resize-none ${darkMode ? 'text-white placeholder-gray-500' : 'text-gray-900'}`}
+                          rows={1}
+                          disabled={isRecording}
+                        />
+                     </div>
 
-                      {newMessage.trim() ? (
-                         <button type="submit" className="p-3 text-white rounded-xl shadow-lg transition-all transform hover:scale-105" style={{ backgroundColor: `var(--theme-color)` }}>
-                            <Send size={22} />
-                         </button>
-                      ) : (
-                         <button type="button" onClick={isRecording ? handleStopRecording : handleStartRecording} 
-                            className={`p-3 rounded-xl text-white shadow-lg transition-all transform hover:scale-105 ${isRecording ? 'bg-red-500 animate-pulse' : ''}`}
-                            style={{ backgroundColor: isRecording ? '' : `var(--theme-color)` }}>
-                            {isRecording ? <Square size={22} /> : <Mic size={22} />}
-                         </button>
-                      )}
+                     {newMessage.trim() ? (
+                        <button type="submit" className="p-3 text-white rounded-xl shadow-lg transition-all transform hover:scale-105" style={{ backgroundColor: `var(--theme-color)` }}>
+                           <Send size={22} />
+                        </button>
+                     ) : (
+                        <button type="button" onClick={isRecording ? handleStopRecording : handleStartRecording} 
+                          className={`p-3 rounded-xl text-white shadow-lg transition-all transform hover:scale-105 ${isRecording ? 'bg-red-500 animate-pulse' : ''}`}
+                          style={{ backgroundColor: isRecording ? '' : `var(--theme-color)` }}>
+                          {isRecording ? <Square size={22} /> : <Mic size={22} />}
+                        </button>
+                     )}
                    </form>
                 </div>
               </>
@@ -701,77 +714,86 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* --- SETTINGS MODAL --- */}
+      {/* --- SETTINGS MODAL (UPDATED FOR SCROLL & STICKY BUTTONS) --- */}
       <AnimatePresence>
          {isProfileModalOpen && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+               {/* Fixed Height & Flex Layout added here for scrolling */}
                <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }} 
-                  className={`w-full max-w-md p-6 rounded-2xl shadow-2xl border ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}`}>
-                  <div className="flex justify-between items-center mb-6 border-b pb-4 dark:border-gray-800">
+                  className={`w-full max-w-md rounded-2xl shadow-2xl border flex flex-col max-h-[85vh] overflow-hidden ${darkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}`}>
+                  
+                  {/* HEADER (Sticky) */}
+                  <div className="flex justify-between items-center p-6 border-b shrink-0 dark:border-gray-800">
                      <h2 className="text-xl font-bold">Settings</h2>
-                     <button onClick={() => setIsProfileModalOpen(false)} className="p-2 rounded-full hover:bg-gray-800 dark:hover:bg-gray-700"><X /></button>
+                     <button onClick={() => setIsProfileModalOpen(false)} className="p-2 rounded-full hover:bg-gray-800 dark:hover:bg-gray-700 transition-colors">
+                       <X className="w-6 h-6" />
+                     </button>
                   </div>
 
-                  <form onSubmit={handleProfileUpdate} className="space-y-6">
-                     <div className="flex justify-center">
-                        <div onClick={() => profilePicInputRef.current.click()} className="relative w-24 h-24 rounded-full bg-gray-800 cursor-pointer overflow-hidden group border-2" style={{ borderColor: `var(--theme-color)` }}>
-                           {profilePicPreview ? <img src={profilePicPreview} className="w-full h-full object-cover" /> : 
-                            (currentUser.photoURL ? <img src={currentUser.photoURL} className="w-full h-full object-cover" /> : <User className="w-10 h-10 m-auto mt-7 text-gray-500" />)}
-                           <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><Camera className="text-white w-8 h-8" /></div>
+                  {/* FORM BODY (Scrollable) */}
+                  <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+                     <form id="settings-form" onSubmit={handleProfileUpdate} className="space-y-6">
+                        <div className="flex justify-center">
+                           <div onClick={() => profilePicInputRef.current.click()} className="relative w-24 h-24 rounded-full bg-gray-800 cursor-pointer overflow-hidden group border-2" style={{ borderColor: `var(--theme-color)` }}>
+                              {profilePicPreview ? <img src={profilePicPreview} className="w-full h-full object-cover" /> : 
+                               (currentUser.photoURL ? <img src={currentUser.photoURL} className="w-full h-full object-cover" /> : <User className="w-10 h-10 m-auto mt-7 text-gray-500" />)}
+                              <div className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><Camera className="text-white w-8 h-8" /></div>
+                           </div>
+                           <input type="file" ref={profilePicInputRef} className="hidden" accept="image/*" onChange={e => { if(e.target.files[0]) { setProfilePicFile(e.target.files[0]); setProfilePicPreview(URL.createObjectURL(e.target.files[0])); } }} />
                         </div>
-                        <input type="file" ref={profilePicInputRef} className="hidden" accept="image/*" onChange={e => { if(e.target.files[0]) { setProfilePicFile(e.target.files[0]); setProfilePicPreview(URL.createObjectURL(e.target.files[0])); } }} />
-                     </div>
 
-                     <div>
-                        <label className="text-xs font-bold uppercase tracking-wider opacity-60 ml-1 text-gray-500">Display Name</label>
-                        <input type="text" value={newDisplayName} onChange={e => setNewDisplayName(e.target.value)} 
-                           className={`w-full mt-1 p-3 rounded-lg border outline-none focus:ring-2 transition-all ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}
-                           style={{ borderColor: `var(--theme-color)` }} />
-                     </div>
-
-                     <div>
-                        <label className="text-xs font-bold uppercase tracking-wider opacity-60 ml-1 flex items-center gap-1 text-gray-500"><Palette size={12}/> Color Theme</label>
-                        <div className="flex gap-3 mt-2">
-                           {Object.keys(themeColors).map((colorKey) => (
-                              <button key={colorKey} type="button" onClick={() => setTheme(colorKey)}
-                                 className={`w-8 h-8 rounded-full border-2 transition-all ${theme === colorKey ? 'border-white scale-110' : 'border-transparent'}`}
-                                 style={{ backgroundColor: themeColors[colorKey].primary }} 
-                              />
-                           ))}
+                        <div>
+                           <label className="text-xs font-bold uppercase tracking-wider opacity-60 ml-1 text-gray-500">Display Name</label>
+                           <input type="text" value={newDisplayName} onChange={e => setNewDisplayName(e.target.value)} 
+                              className={`w-full mt-1 p-3 rounded-lg border outline-none focus:ring-2 transition-all ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}
+                              style={{ borderColor: `var(--theme-color)` }} />
                         </div>
-                     </div>
 
-                     <div>
-                        <label className="text-xs font-bold uppercase tracking-wider opacity-60 ml-1 text-gray-500">Chat Wallpaper</label>
-                        <div className="flex gap-3 mt-2">
-                           <input type="file" ref={wallpaperInputRef} className="hidden" accept="image/*" onChange={e => { if(e.target.files[0]) { setWallpaperFile(e.target.files[0]); setWallpaperPreview(URL.createObjectURL(e.target.files[0])); } }} />
-                           <button type="button" onClick={() => wallpaperInputRef.current.click()} className="px-4 py-2 text-sm border rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 dark:border-gray-700 dark:text-gray-300 transition-colors">Select Image</button>
-                           {(wallpaperPreview || wallpaper) && <button type="button" onClick={() => { setWallpaperFile(null); setWallpaperPreview(''); setWallpaper(''); }} className="px-4 py-2 text-sm border border-red-500/50 text-red-500 rounded-lg hover:bg-red-500/10">Remove</button>}
+                        <div>
+                           <label className="text-xs font-bold uppercase tracking-wider opacity-60 ml-1 flex items-center gap-1 text-gray-500"><Palette size={12}/> Color Theme</label>
+                           <div className="flex gap-3 mt-2">
+                              {Object.keys(themeColors).map((colorKey) => (
+                                 <button key={colorKey} type="button" onClick={() => setTheme(colorKey)}
+                                    className={`w-8 h-8 rounded-full border-2 transition-all ${theme === colorKey ? 'border-white scale-110' : 'border-transparent'}`}
+                                    style={{ backgroundColor: themeColors[colorKey].primary }} 
+                                 />
+                              ))}
+                           </div>
                         </div>
-                        {(wallpaperPreview || wallpaper) && <img src={wallpaperPreview || wallpaper} className="mt-3 h-24 w-full object-cover rounded-lg border border-gray-700" />}
-                     </div>
 
-                     <div>
-                        <label className="text-xs font-bold uppercase tracking-wider opacity-60 ml-1 flex items-center gap-1 text-gray-500"><Database size={12}/> Backup Frequency</label>
-                        <select value={selectedBackupFrequency} onChange={e => setSelectedBackupFrequency(e.target.value)}
-                           className={`w-full mt-1 p-3 rounded-lg border outline-none ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}
-                           style={{ borderColor: `var(--theme-color)` }}>
-                           <option value="off">Off</option>
-                           <option value="daily">Daily</option>
-                           <option value="weekly">Weekly</option>
-                        </select>
-                        
-                        <button type="button" onClick={handleExportChat} className="mt-3 w-full flex items-center justify-center gap-2 p-2 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors border border-transparent dark:border-gray-700">
-                           <Save size={16} /> Export Chat to JSON
-                        </button>
-                     </div>
+                        <div>
+                           <label className="text-xs font-bold uppercase tracking-wider opacity-60 ml-1 text-gray-500">Chat Wallpaper</label>
+                           <div className="flex gap-3 mt-2">
+                              <input type="file" ref={wallpaperInputRef} className="hidden" accept="image/*" onChange={e => { if(e.target.files[0]) { setWallpaperFile(e.target.files[0]); setWallpaperPreview(URL.createObjectURL(e.target.files[0])); } }} />
+                              <button type="button" onClick={() => wallpaperInputRef.current.click()} className="px-4 py-2 text-sm border rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 dark:border-gray-700 dark:text-gray-300 transition-colors">Select Image</button>
+                              {(wallpaperPreview || wallpaper) && <button type="button" onClick={() => { setWallpaperFile(null); setWallpaperPreview(''); setWallpaper(''); }} className="px-4 py-2 text-sm border border-red-500/50 text-red-500 rounded-lg hover:bg-red-500/10">Remove</button>}
+                           </div>
+                           {(wallpaperPreview || wallpaper) && <img src={wallpaperPreview || wallpaper} className="mt-3 h-24 w-full object-cover rounded-lg border border-gray-700" />}
+                        </div>
 
-                     <div className="pt-4">
-                        <button type="submit" disabled={isUpdatingProfile} className="w-full py-3.5 text-white rounded-xl font-bold shadow-lg transition-all transform hover:scale-[1.02] flex items-center justify-center gap-2" style={{ backgroundColor: `var(--theme-color)` }}>
-                           <Save size={18} /> {isUpdatingProfile ? 'Saving...' : 'Save Changes'}
-                        </button>
-                     </div>
-                  </form>
+                        <div>
+                           <label className="text-xs font-bold uppercase tracking-wider opacity-60 ml-1 flex items-center gap-1 text-gray-500"><Database size={12}/> Backup Frequency</label>
+                           <select value={selectedBackupFrequency} onChange={e => setSelectedBackupFrequency(e.target.value)}
+                              className={`w-full mt-1 p-3 rounded-lg border outline-none ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}
+                              style={{ borderColor: `var(--theme-color)` }}>
+                              <option value="off">Off</option>
+                              <option value="daily">Daily</option>
+                              <option value="weekly">Weekly</option>
+                           </select>
+                           
+                           <button type="button" onClick={handleExportChat} className="mt-3 w-full flex items-center justify-center gap-2 p-2 bg-gray-100 dark:bg-gray-800 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors border border-transparent dark:border-gray-700">
+                              <Save size={16} /> Export Chat to JSON
+                           </button>
+                        </div>
+                     </form>
+                  </div>
+
+                  {/* FOOTER (Sticky Save/Apply Button) */}
+                  <div className="p-6 border-t shrink-0 dark:border-gray-800">
+                      <button type="submit" form="settings-form" disabled={isUpdatingProfile} className="w-full py-3.5 text-white rounded-xl font-bold shadow-lg transition-all transform hover:scale-[1.02] flex items-center justify-center gap-2" style={{ backgroundColor: `var(--theme-color)` }}>
+                        <Save size={18} /> {isUpdatingProfile ? 'Saving...' : 'Save & Apply Changes'}
+                     </button>
+                  </div>
                </motion.div>
             </div>
          )}
@@ -824,7 +846,6 @@ const Dashboard = () => {
                      {filePreview ? <img src={filePreview} className="max-h-48 mx-auto rounded-lg shadow-sm" /> : <div className="flex justify-center py-8"><File size={48} className="opacity-50 text-white" /></div>}
                      <p className="text-sm truncate text-center mt-3 font-medium opacity-80 text-gray-300">{fileToSend.name}</p>
                      
-                     {/* RESTORED PERMISSION CHECKBOXES */}
                      <div className="mt-4 space-y-2 border-t border-gray-700 pt-3">
                         <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer hover:text-white">
                            <input type="checkbox" checked={allowDownload} onChange={e => setAllowDownload(e.target.checked)} className="rounded bg-gray-700 border-gray-600 focus:ring-2" style={{ color: `var(--theme-color)`, borderColor: `var(--theme-color)` }} />
@@ -885,7 +906,6 @@ const Dashboard = () => {
           </div>
         )}
       </AnimatePresence>
-      
     </div>
   );
 };
