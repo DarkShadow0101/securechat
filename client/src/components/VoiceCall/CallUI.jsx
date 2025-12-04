@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import CryptoJS from "crypto-js";
 import { useAuth } from "../../contexts/AuthContext";
-import { Phone, PhoneOff, Mic, MicOff, User } from 'lucide-react';
+import { Phone, PhoneOff, Mic, MicOff, User, Video, VideoOff } from 'lucide-react';
 
 export default function CallUI({
   otherUserId: propOtherUserId,
@@ -18,14 +18,27 @@ export default function CallUI({
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
   const iceCandidatesQueue = useRef([]); 
   const otherUserIdRef = useRef(incomingCallData ? incomingCallData.from : propOtherUserId);
 
   // State
   const [status, setStatus] = useState(incomingCallData ? "ringing" : "calling");
+  const statusRef = useRef(status);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => { statusRef.current = status; }, [status]);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+
   const [isMuted, setIsMuted] = useState(false);
+  const [isVideoEnabled, setIsVideoEnabled] = useState(false);
+  const [hasRemoteVideo, setHasRemoteVideo] = useState(false); // NEW: Track remote video state
   const [duration, setDuration] = useState(0);
   const [imgError, setImgError] = useState(false); 
+  
+  // Track remote stream in ref so we can re-attach it when UI mounts
+  const remoteStreamRefVal = useRef(null); 
 
   // Timer
   useEffect(() => {
@@ -35,6 +48,124 @@ export default function CallUI({
     }
     return () => clearInterval(timer);
   }, [status]);
+
+  // --- ADDED: Close Button for Ended Call State ---
+  const handleClose = () => {
+      if (onCloseRef.current) onCloseRef.current();
+  };
+
+  // --- RINGTONE GENERATOR ---
+  const playIncomingRing = () => {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return null;
+      const ctx = new AudioContext();
+      
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const gain = ctx.createGain();
+      
+      // Standard US Ring frequency (approx)
+      osc1.frequency.value = 440;
+      osc2.frequency.value = 480;
+      
+      osc1.connect(gain);
+      osc2.connect(gain);
+      gain.connect(ctx.destination);
+      
+      const now = ctx.currentTime;
+      
+      // Create a loop of ringing: 2s ON, 4s OFF
+      // We schedule 5 cycles (30 seconds) which is plenty for a ring
+      for (let i = 0; i < 10; i++) {
+        const start = now + i * 6;
+        const end = start + 2;
+        
+        gain.gain.setValueAtTime(0, start);
+        gain.gain.linearRampToValueAtTime(0.1, start + 0.1); // Attack
+        gain.gain.setValueAtTime(0.1, end); 
+        gain.gain.linearRampToValueAtTime(0, end + 0.1);   // Release
+      }
+      
+      osc1.start();
+      osc2.start();
+      
+      return { stop: () => { try{ osc1.stop(); osc2.stop(); ctx.close(); }catch(e){} } };
+    } catch(e) { return null; }
+  };
+
+  useEffect(() => {
+     let ringtoneHandler = null;
+     
+     // Only ring if WE are the callee (incoming call)
+     if (status === 'ringing') {
+         // 1. Play Ringtone
+         ringtoneHandler = playIncomingRing();
+         
+         // 2. Speak "Incoming Call"
+         if ('speechSynthesis' in window) {
+             // Cancel any previous speech
+             window.speechSynthesis.cancel();
+             const utterance = new SpeechSynthesisUtterance(`Incoming call from ${otherUserName}`);
+             // utterance.rate = 0.9;
+             window.speechSynthesis.speak(utterance);
+         }
+     }
+     
+     return () => {
+         if (ringtoneHandler) ringtoneHandler.stop();
+         if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+     };
+  }, [status, otherUserName]);
+
+  // Handle Glare (Simultaneous calls) & Renegotiation
+  useEffect(() => {
+    if (incomingCallData) {
+       // 1. RENEGOTIATION (Already in call)
+       if (status === 'in-call') {
+           const handleRenegotiation = async () => {
+              const pc = pcRef.current;
+              if (pc && incomingCallData.envelope.type === 'offer') {
+                 console.log("🔄 Handling renegotiation offer...");
+                 try {
+                   await pc.setRemoteDescription(new RTCSessionDescription(incomingCallData.payload));
+                   const answer = await pc.createAnswer();
+                   await pc.setLocalDescription(answer);
+                   sendSignal("answer", { sdp: answer.sdp, type: answer.type });
+                 } catch (err) {
+                   console.error("Renegotiation failed", err);
+                 }
+              }
+           };
+           handleRenegotiation();
+           return;
+       }
+
+       // 2. INITIAL CALL GLARE HANDLING
+       if (status === 'calling') {
+         const myUid = localUid;
+         const otherUid = incomingCallData.from;
+
+         // Simple tie-breaker: Lower UID yields and accepts the incoming call.
+         // Higher UID ignores the incoming call and continues as the Caller.
+         if (myUid < otherUid) {
+            console.log("Glare detected: yielding to incoming call (I am callee)");
+            // Close the outgoing attempt
+            if (pcRef.current) {
+              pcRef.current.close();
+              pcRef.current = null;
+            }
+            iceCandidatesQueue.current = [];
+            
+            setStatus('ringing');
+            otherUserIdRef.current = incomingCallData.from;
+         } else {
+            console.log("Glare detected: persisting as caller (I am caller)");
+            // We ignore the incoming call data and wait for them to answer OUR offer.
+         }
+      }
+    }
+  }, [incomingCallData, status, localUid]);
 
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -74,10 +205,30 @@ export default function CallUI({
     };
 
     pc.ontrack = (event) => {
-      console.log("🔊 Audio Stream Received");
+      console.log("🔊/📹 Stream Received");
+      const stream = event.streams[0];
+      
+      // Audio
       if (remoteAudioRef.current) {
-        remoteAudioRef.current.srcObject = event.streams[0];
-        remoteAudioRef.current.play().catch(e => console.error("Autoplay blocked", e));
+        remoteAudioRef.current.srcObject = stream;
+        remoteAudioRef.current.play().catch(e => console.error("Audio Autoplay blocked", e));
+      }
+      
+      // Video
+      const videoTracks = stream.getVideoTracks();
+      if (videoTracks.length > 0) {
+         setHasRemoteVideo(true);
+         remoteStreamRefVal.current = stream; // Save for useEffect
+
+         // Monitor track mute/unmute to update UI
+         videoTracks[0].onmute = () => setHasRemoteVideo(false);
+         videoTracks[0].onunmute = () => setHasRemoteVideo(true);
+         videoTracks[0].onended = () => setHasRemoteVideo(false);
+
+         if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = stream;
+            remoteVideoRef.current.play().catch(e => console.error("Video Autoplay blocked", e));
+         }
       }
     };
 
@@ -92,12 +243,79 @@ export default function CallUI({
 
   const getLocalMedia = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Always start with audio
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       localStreamRef.current = stream;
       return stream;
     } catch (err) {
       alert("Microphone access denied.");
       endCall("local-error");
+    }
+  };
+
+  // Sync Local Video when enabled
+  useEffect(() => {
+    if (isVideoEnabled && localVideoRef.current && localStreamRef.current) {
+        const videoTrack = localStreamRef.current.getVideoTracks()[0];
+        if (videoTrack) {
+            const newStream = new MediaStream([videoTrack]);
+            localVideoRef.current.srcObject = newStream;
+            localVideoRef.current.play().catch(e => console.log("Local video play error", e));
+        }
+    }
+  }, [isVideoEnabled]);
+
+  // Sync Remote Video when state changes (Fix for "grey screen" if ref wasn't ready)
+  useEffect(() => {
+    if (hasRemoteVideo && remoteVideoRef.current && remoteStreamRefVal.current) {
+        remoteVideoRef.current.srcObject = remoteStreamRefVal.current;
+        remoteVideoRef.current.play().catch(e => console.log("Remote video play error", e));
+    }
+  }, [hasRemoteVideo]);
+
+  const toggleVideo = async () => {
+    if (isVideoEnabled) {
+       // Turn off
+       const videoTrack = localStreamRef.current?.getVideoTracks()[0];
+       if (videoTrack) {
+         videoTrack.stop();
+         localStreamRef.current.removeTrack(videoTrack);
+         const sender = pcRef.current.getSenders().find(s => s.track && s.track.kind === 'video');
+         if (sender) pcRef.current.removeTrack(sender);
+       }
+       setIsVideoEnabled(false);
+       
+       // Negotiate removal
+       try {
+         const offer = await pcRef.current.createOffer();
+         await pcRef.current.setLocalDescription(offer);
+         sendSignal("offer", { sdp: offer.sdp, type: offer.type });
+       } catch (e) { console.error("Renegotiation error (video off)", e); }
+       
+    } else {
+       // Turn on
+       try {
+         const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+         const videoTrack = videoStream.getVideoTracks()[0];
+         
+         if (!localStreamRef.current) localStreamRef.current = new MediaStream();
+         localStreamRef.current.addTrack(videoTrack);
+         
+         if (pcRef.current) {
+            pcRef.current.addTrack(videoTrack, localStreamRef.current);
+            // Negotiate addition
+            const offer = await pcRef.current.createOffer();
+            await pcRef.current.setLocalDescription(offer);
+            sendSignal("offer", { sdp: offer.sdp, type: offer.type });
+         }
+         
+         setIsVideoEnabled(true);
+         // Effect will handle attaching stream to video ref
+         
+       } catch(e) {
+         console.error("Failed to enable video", e);
+         alert("Could not access camera.");
+       }
     }
   };
 
@@ -146,22 +364,31 @@ export default function CallUI({
   };
 
   const endCall = (reason = "local-hangup") => {
+    console.log("Ending call, reason:", reason);
     if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }
     if (localStreamRef.current) { localStreamRef.current.getTracks().forEach(t => t.stop()); localStreamRef.current = null; }
     if (reason === "local-hangup" && otherUserIdRef.current) sendSignal("hangup", { reason });
     setStatus("ended");
-    setTimeout(onClose, 1000);
+    setIsVideoEnabled(false);
+    
+    // Force cleanup after delay
+    setTimeout(() => {
+      if (onCloseRef.current) onCloseRef.current();
+      window.location.reload(); // Temporary fix: hard refresh to clear WebRTC state ghosts
+    }, 1500);
   };
 
   // --- Signal Listener ---
   useEffect(() => {
     const handleGlobalSignal = async (e) => {
       const { envelope, payload } = e.detail;
+      // Use refs for current values
       if (envelope.from !== otherUserIdRef.current) return;
 
       const pc = pcRef.current;
       if (envelope.type === "hangup") { 
-         if(status !== 'ended') endCall("remote-hangup"); 
+         console.log("Received hangup signal");
+         if(statusRef.current !== 'ended') endCall("remote-hangup"); 
          return; 
       }
       if (envelope.type === "answer" && pc) {
@@ -181,6 +408,7 @@ export default function CallUI({
     };
 
     window.addEventListener("signal:message", handleGlobalSignal);
+    // Only start call if we are the initiator and haven't been preempted by incoming data
     if (!incomingCallData && status === "calling") startCall();
 
     return () => window.removeEventListener("signal:message", handleGlobalSignal);
@@ -191,90 +419,122 @@ export default function CallUI({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
       <audio ref={remoteAudioRef} autoPlay playsInline />
       
-      {/* COMPACT GLASS CARD */}
-      <div className="w-full max-w-sm bg-white dark:bg-gray-800 rounded-3xl shadow-2xl overflow-hidden transform scale-100 border border-white/10">
+      {/* MAIN CARD (Adaptive Size) */}
+      <div className={`w-full bg-white dark:bg-gray-800 rounded-3xl shadow-2xl overflow-hidden transform transition-all duration-500 border border-white/10 flex flex-col ${isVideoEnabled || hasRemoteVideo ? 'max-w-4xl h-[80vh]' : 'max-w-sm'}`}>
         
-        {/* PREMIUM HEADER GRADIENT */}
-        <div className="h-28 bg-gradient-to-r from-blue-600 to-purple-600 relative">
+        {/* VIDEO AREA (If enabled) */}
+        {(isVideoEnabled || hasRemoteVideo) && (
+           <div className="flex-1 relative bg-black flex items-center justify-center overflow-hidden group">
+              {/* Remote Video */}
+              {hasRemoteVideo ? (
+                 <video ref={remoteVideoRef} className="w-full h-full object-contain" autoPlay playsInline />
+              ) : (
+                 // Show Avatar if remote video is off but local video is on
+                 <div className="flex flex-col items-center justify-center opacity-50">
+                    <div className="w-32 h-32 rounded-full border-4 border-gray-700 bg-gray-800 overflow-hidden flex items-center justify-center mb-4">
+                        {otherUserPhoto && !imgError ? (
+                           <img src={otherUserPhoto} className="w-full h-full object-cover" alt="User" onError={() => setImgError(true)} />
+                        ) : ( <User size={64} className="text-gray-500" /> )}
+                    </div>
+                    <p className="text-white font-semibold text-lg">{otherUserName}</p>
+                    <p className="text-gray-400 text-sm">Camera Off</p>
+                 </div>
+              )}
+              
+              {/* Local Video (PiP) */}
+              {isVideoEnabled && (
+                  <div className="absolute bottom-4 right-4 w-32 h-48 bg-gray-900 rounded-xl overflow-hidden border-2 border-white/20 shadow-xl z-10">
+                     <video ref={localVideoRef} className="w-full h-full object-cover transform scale-x-[-1]" autoPlay playsInline muted />
+                  </div>
+              )}
+           </div>
+        )}
+
+        {/* HEADER GRADIENT (Only if no video active or overlaying) */}
+        {!(isVideoEnabled || hasRemoteVideo) && (
+        <div className="h-28 bg-gradient-to-r from-blue-600 to-purple-600 relative shrink-0">
            <div className="absolute -bottom-12 left-1/2 transform -translate-x-1/2">
               <div className="relative">
-                 {/* PROFILE PICTURE WITH GLOW */}
+                 {/* PROFILE PICTURE */}
                  <div className="w-28 h-28 rounded-full border-4 border-white dark:border-gray-800 bg-gray-700 overflow-hidden flex items-center justify-center shadow-lg">
                     {otherUserPhoto && !imgError ? (
-                       <img 
-                         src={otherUserPhoto} 
-                         className="w-full h-full object-cover" 
-                         alt="User"
-                         onError={() => setImgError(true)} 
-                       />
-                    ) : (
-                       <User size={48} className="text-gray-300" />
-                    )}
+                       <img src={otherUserPhoto} className="w-full h-full object-cover" alt="User" onError={() => setImgError(true)} />
+                    ) : ( <User size={48} className="text-gray-300" /> )}
                  </div>
                  
-                 {/* PULSING ANIMATION (Ringing/Calling) */}
+                 {/* ANIMATIONS */}
                  {(status === 'ringing' || status === 'calling') && (
                     <>
                       <span className="absolute inset-0 rounded-full border-2 border-white/50 animate-[ping_1.5s_cubic-bezier(0,0,0.2,1)_infinite]"></span>
                       <span className="absolute inset-0 rounded-full border-2 border-white/30 animate-[ping_1.5s_cubic-bezier(0,0,0.2,1)_infinite_0.5s]"></span>
                     </>
                  )}
-                 {/* Connected Indicator */}
-                 {status === 'in-call' && (
-                    <div className="absolute bottom-1 right-1 w-5 h-5 bg-green-500 border-2 border-white dark:border-gray-800 rounded-full"></div>
-                 )}
+                 {status === 'in-call' && <div className="absolute bottom-1 right-1 w-5 h-5 bg-green-500 border-2 border-white dark:border-gray-800 rounded-full"></div>}
               </div>
            </div>
         </div>
+        )}
 
-        {/* CALL INFO */}
-        <div className="pt-14 pb-8 px-6 text-center">
-           <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-1 tracking-tight">{otherUserName}</h3>
-           <p className="text-sm font-semibold text-blue-500 mb-8 uppercase tracking-wider">
-              {status === 'ringing' ? 'Incoming Call...' : 
-               status === 'calling' ? 'Calling...' : 
-               status === 'in-call' ? formatTime(duration) : 
-               status === 'connecting' ? 'Connecting...' : 'Call Ended'}
-           </p>
+        {/* CALL INFO & CONTROLS */}
+        <div className={`px-6 text-center flex flex-col ${isVideoEnabled || hasRemoteVideo ? 'pb-6 pt-4 bg-gray-900' : 'pt-14 pb-8'}`}>
+           
+           {/* Text Info */}
+           <div className="mb-6">
+              <h3 className={`text-2xl font-bold tracking-tight ${isVideoEnabled || hasRemoteVideo ? 'text-white' : 'text-gray-900 dark:text-white'}`}>{otherUserName}</h3>
+              <p className="text-sm font-semibold text-blue-500 uppercase tracking-wider">
+                 {status === 'ringing' ? 'Incoming Call...' : 
+                  status === 'calling' ? 'Calling...' : 
+                  status === 'in-call' ? formatTime(duration) : 
+                  status === 'connecting' ? 'Connecting...' : 'Call Ended'}
+              </p>
+           </div>
 
            {/* ACTION BUTTONS */}
-           <div className="flex justify-center items-center gap-8">
+           <div className="flex justify-center items-center gap-6">
               {status === 'ringing' ? (
                  <>
-                    {/* Answer */}
-                    <button onClick={answerCall} className="w-16 h-16 rounded-full bg-green-500 hover:bg-green-600 flex items-center justify-center text-white shadow-xl shadow-green-500/30 transition-all hover:scale-110 active:scale-95">
-                       <Phone size={28} fill="currentColor" />
-                    </button>
-                    {/* Decline */}
-                    <button onClick={() => endCall("declined")} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center text-white shadow-xl shadow-red-500/30 transition-all hover:scale-110 active:scale-95">
-                       <PhoneOff size={28} />
-                    </button>
+                    <button onClick={answerCall} className="w-16 h-16 rounded-full bg-green-500 hover:bg-green-600 flex items-center justify-center text-white shadow-xl transition-all hover:scale-110"><Phone size={28} fill="currentColor" /></button>
+                    <button onClick={() => endCall("declined")} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center text-white shadow-xl transition-all hover:scale-110"><PhoneOff size={28} /></button>
                  </>
+              ) : status === 'ended' ? (
+                 <button onClick={handleClose} className="px-8 py-3 bg-gray-200 dark:bg-gray-700 rounded-full font-bold text-gray-700 dark:text-white hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">
+                    Close
+                 </button>
               ) : (
                  <>
-                    {/* Mute (Only in-call) */}
+                    {/* Mute */}
                     {status === 'in-call' && (
                        <button onClick={() => {
                           if(localStreamRef.current) {
-                             localStreamRef.current.getAudioTracks()[0].enabled = !isMuted;
-                             setIsMuted(!isMuted);
+                             const audioTrack = localStreamRef.current.getAudioTracks()[0];
+                             if(audioTrack) {
+                                 // If currently muted (isMuted=true), we want to ENABLE it (true).
+                                 // If currently unmuted (isMuted=false), we want to DISABLE it (false).
+                                 audioTrack.enabled = isMuted; 
+                                 setIsMuted(!isMuted);
+                             }
                           }
-                       }} className={`w-14 h-14 rounded-full flex items-center justify-center shadow-md transition-all active:scale-95 ${isMuted ? 'bg-white text-gray-900 hover:bg-gray-100' : 'bg-gray-700/50 text-white hover:bg-gray-700'}`}>
+                       }} className={`w-14 h-14 rounded-full flex items-center justify-center shadow-md transition-all active:scale-95 ${isMuted ? 'bg-white text-gray-900' : 'bg-gray-700/50 text-white hover:bg-gray-700'}`}>
                           {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
                        </button>
+                    )}
+
+                    {/* Video Toggle (NEW) */}
+                    {status === 'in-call' && (
+                        <button onClick={toggleVideo} className={`w-14 h-14 rounded-full flex items-center justify-center shadow-md transition-all active:scale-95 ${isVideoEnabled ? 'bg-white text-gray-900' : 'bg-gray-700/50 text-white hover:bg-gray-700'}`}>
+                           {isVideoEnabled ? <Video size={24} /> : <VideoOff size={24} />}
+                        </button>
                     )}
                     
                     {/* End Call */}
                     {status !== 'ended' && (
-                       <button onClick={() => endCall("local-hangup")} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center text-white shadow-xl shadow-red-500/30 transition-all hover:scale-110 active:scale-95">
+                       <button onClick={() => endCall("local-hangup")} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center text-white shadow-xl transition-all hover:scale-110 active:scale-95">
                           <PhoneOff size={28} />
                        </button>
                     )}
                  </>
               )}
            </div>
-           
-           <p className="mt-6 text-xs text-gray-400 font-medium">End-to-End Encrypted</p>
         </div>
       </div>
     </div>
